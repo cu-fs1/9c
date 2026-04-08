@@ -1,62 +1,99 @@
-# Next.js Static Export with Nginx & Docker
+# Experiment : 9c
 
-This repository contains a modern **Next.js (v16)** application configured for **Static HTML Export**, containerized using a multi-stage **Docker** build, and served securely via an unprivileged **Nginx** container.
+## AWS Deployment with Load Balancing
 
-## Architectural Overview
+### Aim
+To deploy a full-stack application on AWS with load balancing and auto-scaling.
 
-- **Framework**: Next.js 16 (React 19, TailwindCSS v4)
-- **Deployment Strategy**: Static Export (`output: "export"`)
-- **Containerization**: Multi-stage Docker build separating dependencies, build process, and production serving.
-- **Web Server**: `nginxinc/nginx-unprivileged:alpine3.22` (serving on port `8080`)
-- **Package Manager**: pnpm
+### Objectives
+1. Configure AWS infrastructure (VPC, EC2, ALB)
+2. Set up auto-scaling group
+3. Deploy Docker containers to ECS
+4. Configure application load balancer
+5. Implement CI/CD pipeline
 
-## Local Development
+### About the Program
+Demonstrates production-grade deployment on AWS with high availability, load balancing, and auto-scaling capabilities.
 
-To run the development server locally:
+---
 
-```bash
-# Install dependencies
-pnpm install
+## Detailed Implementation Steps (Using the existing Next.js + Nginx setup)
 
-# Start the development server
-pnpm dev
-```
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+This repository contains a containerized Next.js frontend configured for static export (`output: "export"`), served securely via Nginx on port `8080`. The following outlines exactly how to deploy this specific setup to AWS using ECS (Fargate), an Application Load Balancer, and CodePipeline.
 
-## Docker Deployment (Production Ready)
+### Step 1: Prepare the ECR Repository & Base Image
+Since you already have a robust multi-stage `Dockerfile`, we first need to set up a registry to host it on AWS.
+1. Authenticate Docker to your Amazon ECR:
+   ```bash
+   aws ecr get-login-password --region <your-region> | docker login --username AWS --password-stdin <aws_account_id>.dkr.ecr.<your-region>.amazonaws.com
+   ```
+2. Create your ECR repository:
+   ```bash
+   aws ecr create-repository --repository-name nextjs-9c-app
+   ```
+3. Build and push your first image manually to test:
+   ```bash
+   docker build -t nextjs-9c-app .
+   docker tag nextjs-9c-app:latest <aws_account_id>.dkr.ecr.<your-region>.amazonaws.com/nextjs-9c-app:latest
+   docker push <aws_account_id>.dkr.ecr.<your-region>.amazonaws.com/nextjs-9c-app:latest
+   ```
 
-The project includes a multi-stage `Dockerfile` and a `compose.yml` to build and serve the production-ready static assets seamlessly.
+### Step 2: Infrastructure Configuration (VPC, ALB, and ECS)
+Using Terraform (or the AWS Console), ensure your infrastructure aligns perfectly with this Next.js project setup:
+1. **VPC Settings**: Create a VPC with 2 Public Subnets (for the ALB) and 2 Private Subnets (for ECS Tasks) to guarantee multi-AZ high availability.
+2. **Application Load Balancer (ALB)**: 
+   - Place the ALB in the Public Subnets.
+   - Create a **Target Group** (Type: `IP` for Fargate networking).
+   - **CRITICAL**: Set the Target Group protocol to `HTTP` and port to `8080` (this matches the `EXPOSE 8080` set natively in your Nginx stage).
+   - Configure the ALB Listener on port `80` to forward incoming traffic directly to this Target Group.
+3. **ECS Cluster & Task Definition**:
+   - Create an ECS Cluster utilizing AWS Fargate.
+   - Define a Task Definition mapping to the ECR image URI created in Step 1.
+   - **Network Mode**: `awsvpc`.
+   - **Container Port Mapping**: Map Container Port `8080` to Host Port `8080`. Let Fargate handle the rest.
+4. **ECS Service & Auto-Scaling setup**:
+   - Deploy your Task Definition as a Service targeting your chosen Private Subnets to keep it unexposed to the open internet (traffic must pass through the ALB).
+   - Link the Service to the target group from Step 2.
+   - **Auto-Scaling**: Set the Application Auto Scaling to keep minimum tasks at `2` and max at `4`. Tie this to a target tracking policy based on `ECSServiceAverageCPUUtilization` at 70%.
 
-### Using Docker Compose
+### Step 3: Implement CI/CD CodePipeline
+Automate future deployment updates directly from this GitHub repo:
+1. **Create a `buildspec.yml` file** at the root of your project:
+   ```yaml
+   version: 0.2
+   phases:
+     pre_build:
+       commands:
+         - echo Logging in to Amazon ECR...
+         - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+         - REPOSITORY_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/nextjs-9c-app
+         - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+         - IMAGE_TAG=${COMMIT_HASH:=latest}
+     build:
+       commands:
+         - echo Building the Next.js Nginx Docker image...
+         - docker build -t $REPOSITORY_URI:latest .
+         - docker tag $REPOSITORY_URI:latest $REPOSITORY_URI:$IMAGE_TAG
+     post_build:
+       commands:
+         - echo Pushing the Docker image...
+         - docker push $REPOSITORY_URI:latest
+         - docker push $REPOSITORY_URI:$IMAGE_TAG
+         - echo Writing image definitions file...
+         # MAKE SURE "nextjs-container" MATCHES EXACTLY the container name found in your ECS Task Definition
+         - printf '[{"name":"nextjs-container","imageUri":"%s"}]' $REPOSITORY_URI:$IMAGE_TAG > imagedefinitions.json
+   artifacts:
+     files: imagedefinitions.json
+   ```
+2. **Setup AWS CodePipeline**:
+   - **Source**: Connect GitHub (trigger on branch `main`).
+   - **Build**: Use AWS CodeBuild (it automatically detects the `buildspec.yml` above to build your new Nginx static assets and push them securely to ECR).
+   - **Deploy**: Choose Amazon ECS. Provide your Cluster name, Service name, and select the output artifact `imagedefinitions.json`. CodeDeploy will perform rolling updates replacing old Nginx containers with new ones.
 
-The simplest way to run the production build locally is using Docker Compose:
+---
 
-```bash
-# Build and start the container in the background
-docker compose up -d --build
-```
-
-The application will be served at [http://localhost:8080](http://localhost:8080).
-
-To stop the container:
-```bash
-docker compose down
-```
-
-### Manual Docker Build
-
-If you prefer building and running the Docker container manually:
-
-```bash
-# Build the Docker image
-docker build -t nextjs-static-export .
-
-# Run the Docker container mapping port 8080
-docker run -p 8080:8080 nextjs-static-export
-```
-
-## How It Works
-
-1. **Dependencies Stage**: Uses `node:24.13.0-slim` to install dependencies via `pnpm` utilizing a cache mount for faster reproducible builds.
-2. **Builder Stage**: Builds the Next.js application. Because `next.config.ts` sets `output: "export"`, Next.js compiles the application into static HTML/CSS/JS files inside the `/app/out` directory.
-3. **Runner Stage**: Uses `nginxinc/nginx-unprivileged` to serve the static contents. The `out` directory is copied into the Nginx HTML path, and an included `nginx.conf` handles the routing safely without root privileges.
+## Expected Output
+- Highly available application across **2 AZs**.
+- Load-balanced traffic with auto-scaling (**2–4 instances**).
+- **Zero-downtime deployments** achieved through ECS rolling updates.
+- Infrastructure managed entirely via **Infrastructure as Code (IaC)**.
